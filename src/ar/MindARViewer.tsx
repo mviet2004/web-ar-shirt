@@ -161,6 +161,7 @@ export default function MindARViewer({ target }: MindARViewerProps) {
           const material = new THREE.MeshBasicMaterial({
             map: videoTexture,
             transparent: true,
+            alphaTest: 0.01,
             depthWrite: false,
             side: THREE.DoubleSide,
           });

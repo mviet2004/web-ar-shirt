@@ -21,7 +21,7 @@ export const arTargets: ARTargetConfig[] = [
     id: 'shirt-01',
     name: 'Shirt 01',
     targetSrc: '/targets/shirt-01.mind',
-    animationSrc: '/animations/shirt-01.mp4',
+    animationSrc: '/animations/shirt-01v3.webm',
     animationType: 'video',
     targetIndex: 0,
     // MindAR uses width 1 for the detected image.
