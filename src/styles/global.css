@@ -33,17 +33,53 @@ button {
 }
 
 .home-page {
+  --scan-origin-x: 50vw;
+  --scan-origin-y: 70vh;
   display: grid;
+  position: relative;
   min-height: 100dvh;
   padding: 24px;
   place-items: center;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.52), rgba(255, 255, 255, 0)),
     #f5f1ea;
+  overflow: hidden;
+  user-select: none;
 }
 
 .home-panel {
+  position: relative;
+  z-index: 2;
+  transform: translateY(0);
+  transition: transform 220ms ease;
   width: min(100%, 440px);
+}
+
+.home-page--opening .home-panel {
+  transform: scale(0.985);
+}
+
+.scan-start-transition {
+  position: fixed;
+  top: var(--scan-origin-y);
+  left: var(--scan-origin-x);
+  z-index: 10;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  pointer-events: none;
+  background: #050505;
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0);
+  transition: none;
+}
+
+.home-page--opening .scan-start-transition {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(62);
+  transition:
+    transform 420ms cubic-bezier(0.8, 0, 0.2, 1),
+    opacity 90ms ease;
 }
 
 .eyebrow {
