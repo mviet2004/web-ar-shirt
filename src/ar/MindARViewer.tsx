@@ -1,13 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MindARThree } from 'mind-ar/dist/mindar-image-three.prod.js';
-import type { ARTargetConfig } from '../config/arTargets';
+import { arTargetConfig } from '../config/arTargets';
+import { arAssets } from './arAssets';
 
 type ARStatus = 'starting' | 'scanning' | 'found' | 'lost' | 'error';
 
-type MindARViewerProps = {
-  target: ARTargetConfig;
+const LOADING_ANIMATION_SRC = '/animations/Demo.mp4';
+const VIDEO_PRELOAD_TIMEOUT_MS = 8000;
+
+type ARVideoRuntime = {
+  video: HTMLVideoElement;
+  texture: THREE.VideoTexture;
+  geometry: THREE.PlaneGeometry;
+  material: THREE.MeshBasicMaterial;
+  mesh: THREE.Mesh;
 };
 
 async function assertAssetExists(src: string, label: string) {
@@ -18,20 +25,48 @@ async function assertAssetExists(src: string, label: string) {
   }
 }
 
-function getFriendlyError(error: unknown) {
-  if (error instanceof DOMException && error.name === 'NotAllowedError') {
-    return 'Camera permission was denied. Please allow camera access and try again.';
-  }
+function preloadVideoStart(video: HTMLVideoElement, src: string) {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
 
-  if (error instanceof Error) {
-    if (error.name === 'NotAllowedError') {
-      return 'Camera permission was denied. Please allow camera access and try again.';
+    const cleanup = () => {
+      window.clearTimeout(timeoutId);
+      video.removeEventListener('canplay', handleCanPlay);
+      video.removeEventListener('error', handleError);
+    };
+
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanup();
+      resolve();
+    };
+
+    const handleCanPlay = () => finish();
+    const handleError = () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanup();
+      reject(new Error(`Animation file could not load from ${src}.`));
+    };
+
+    const timeoutId = window.setTimeout(finish, VIDEO_PRELOAD_TIMEOUT_MS);
+
+    video.addEventListener('canplay', handleCanPlay, { once: true });
+    video.addEventListener('error', handleError, { once: true });
+
+    video.load();
+
+    if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+      finish();
     }
-
-    return error.message;
-  }
-
-  return 'MindAR could not start. Please refresh and try again.';
+  });
 }
 
 function mapFullVideoToTarget(texture: THREE.VideoTexture) {
@@ -39,10 +74,10 @@ function mapFullVideoToTarget(texture: THREE.VideoTexture) {
   texture.offset.set(0, 0);
 }
 
-export default function MindARViewer({ target }: MindARViewerProps) {
+export default function MindARViewer() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [status, setStatus] = useState<ARStatus>('starting');
-  const [message, setMessage] = useState('Starting camera...');
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     if (!containerRef.current) {
@@ -51,167 +86,104 @@ export default function MindARViewer({ target }: MindARViewerProps) {
 
     let isMounted = true;
     let mindarThree: MindARThree | null = null;
-    let mixer: THREE.AnimationMixer | null = null;
-    let model: THREE.Object3D | null = null;
-    let overlayGroup: THREE.Group | null = null;
-    let video: HTMLVideoElement | null = null;
-    let videoTexture: THREE.VideoTexture | null = null;
-    const clock = new THREE.Clock();
-    const targetPosition = new THREE.Vector3();
-    const targetQuaternion = new THREE.Quaternion();
-    const targetScale = new THREE.Vector3();
-    const smoothPosition = new THREE.Vector3();
-    const smoothQuaternion = new THREE.Quaternion();
-    const smoothScale = new THREE.Vector3(1, 1, 1);
-    const smoothingAmount = 0.22;
-    let hasSmoothedFrame = false;
+    let activeTargetIndex: number | null = null;
+    const videos: HTMLVideoElement[] = [];
+    const runtimes: ARVideoRuntime[] = [];
 
     const startAR = async () => {
       try {
+        setIsLoading(true);
         setStatus('starting');
-        setMessage('Loading AR assets...');
 
-        await assertAssetExists(target.targetSrc, '.mind target file');
-        await assertAssetExists(target.animationSrc, 'Animation file');
+        await Promise.all([
+          assertAssetExists(arTargetConfig.targetSrc, '.mind target file'),
+          assertAssetExists(LOADING_ANIMATION_SRC, 'Loading animation'),
+          ...arAssets.map((asset) => assertAssetExists(asset.videoSrc, 'Animation file')),
+        ]);
 
         if (!isMounted || !containerRef.current) {
           return;
         }
 
-        setMessage('Opening camera...');
-
         mindarThree = new MindARThree({
           container: containerRef.current,
-          imageTargetSrc: target.targetSrc,
+          imageTargetSrc: arTargetConfig.targetSrc,
           maxTrack: 1,
-          uiScanning: 'no',
-          filterMinCF: target.tracking.filterMinCF,
-          filterBeta: target.tracking.filterBeta,
-          warmupTolerance: target.tracking.warmupTolerance,
-          missTolerance: target.tracking.missTolerance,
+          uiLoading: 'no',
+          uiScanning: '#custom-scanning-frame',
+          uiError: 'no',
+          filterMinCF: arTargetConfig.tracking.filterMinCF,
+          filterBeta: arTargetConfig.tracking.filterBeta,
+          warmupTolerance: arTargetConfig.tracking.warmupTolerance,
+          missTolerance: arTargetConfig.tracking.missTolerance,
         });
 
         const { renderer, scene, camera } = mindarThree;
-        const anchor = mindarThree.addAnchor(target.targetIndex);
-        overlayGroup = new THREE.Group();
-        overlayGroup.visible = false;
-        scene.add(overlayGroup);
 
-        const light = new THREE.HemisphereLight(0xffffff, 0x6f675d, 2);
-        scene.add(light);
+        await Promise.all(
+          arAssets.map(async (asset) => {
+            const anchor = mindarThree!.addAnchor(asset.targetIndex);
+            const video = document.createElement('video');
+            video.src = asset.videoSrc;
+            video.crossOrigin = 'anonymous';
+            video.loop = true;
+            video.muted = true;
+            video.playsInline = true;
+            video.preload = 'auto';
+            videos.push(video);
 
-        if (target.animationType === 'model') {
-          const loader = new GLTFLoader();
-          const gltf = await loader.loadAsync(target.animationSrc);
+            await preloadVideoStart(video, asset.videoSrc);
 
-          if (!isMounted) {
-            return;
-          }
-
-          model = gltf.scene;
-          model.visible = false;
-          model.scale.setScalar(target.modelScale);
-          overlayGroup.add(model);
-
-          // GLB files can contain timeline animations. The mixer controls play,
-          // pause, and frame updates for those clips while the target is visible.
-          if (gltf.animations.length > 0) {
-            mixer = new THREE.AnimationMixer(model);
-            gltf.animations.forEach((clip) => {
-              const action = mixer!.clipAction(clip);
-              action.play();
-            });
-            mixer.timeScale = 0;
-          }
-        } else {
-          video = document.createElement('video');
-          video.src = target.animationSrc;
-          video.crossOrigin = 'anonymous';
-          video.loop = true;
-          video.muted = true;
-          video.playsInline = true;
-          video.preload = 'auto';
-          video.load();
-
-          await new Promise<void>((resolve, reject) => {
-            if (!video) {
-              reject(new Error('Animation video could not be created.'));
+            if (!isMounted) {
               return;
             }
 
-            video.addEventListener('loadedmetadata', () => resolve(), { once: true });
-            video.addEventListener(
-              'error',
-              () => reject(new Error(`Animation file could not load from ${target.animationSrc}.`)),
-              { once: true },
-            );
-          });
+            const texture = new THREE.VideoTexture(video);
+            texture.encoding = THREE.sRGBEncoding;
+            mapFullVideoToTarget(texture);
 
-          if (!isMounted || !video) {
-            return;
-          }
+            // MindAR normalizes every target to width 1. Its height must follow
+            // the dimensions embedded in targets.mind for a 1:1 overlay.
+            const targetAspectRatio = asset.targetHeight / asset.targetWidth;
+            const geometry = new THREE.PlaneGeometry(1, targetAspectRatio);
+            const material = new THREE.MeshBasicMaterial({
+              map: texture,
+              transparent: true,
+              alphaTest: 0.01,
+              depthWrite: false,
+              side: THREE.DoubleSide,
+            });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.scale.setScalar(asset.overlayScale);
+            mesh.position.z = 0.01;
+            anchor.group.add(mesh);
 
-          videoTexture = new THREE.VideoTexture(video);
-          videoTexture.encoding = THREE.sRGBEncoding;
-          // Map the whole animation onto the full printed graphic area.
-          // This preserves text such as "World Game 2026" instead of cropping.
-          mapFullVideoToTarget(videoTexture);
+            runtimes.push({ video, texture, geometry, material, mesh });
 
-          const geometry = new THREE.PlaneGeometry(target.overlayWidth, target.overlayHeight);
-          const material = new THREE.MeshBasicMaterial({
-            map: videoTexture,
-            transparent: true,
-            alphaTest: 0.01,
-            depthWrite: false,
-            side: THREE.DoubleSide,
-          });
+            anchor.onTargetFound = () => {
+              activeTargetIndex = asset.targetIndex;
+              setStatus('found');
 
-          model = new THREE.Mesh(geometry, material);
-          model.visible = false;
-          model.position.z = 0.01;
-          overlayGroup.add(model);
-        }
+              runtimes.forEach(({ video: otherVideo }) => {
+                if (otherVideo !== video) {
+                  otherVideo.pause();
+                }
+              });
 
-        anchor.onTargetFound = () => {
-          setStatus('found');
-          setMessage('Graphic found! Animation playing ♥');
-          hasSmoothedFrame = false;
+              video.currentTime = 0;
+              void video.play().catch(() => undefined);
+            };
 
-          if (overlayGroup) {
-            overlayGroup.visible = true;
-          }
+            anchor.onTargetLost = () => {
+              video.pause();
 
-          if (model) {
-            model.visible = true;
-          }
-
-          if (mixer) {
-            mixer.timeScale = 1;
-          }
-
-          void video?.play().catch(() => {
-            setMessage('Tap the screen to play animation');
-          });
-        };
-
-        anchor.onTargetLost = () => {
-          setStatus('lost');
-          setMessage('Move closer to the shirt graphic');
-
-          if (overlayGroup) {
-            overlayGroup.visible = false;
-          }
-
-          if (model) {
-            model.visible = false;
-          }
-
-          if (mixer) {
-            mixer.timeScale = 0;
-          }
-
-          video?.pause();
-        };
+              if (activeTargetIndex === asset.targetIndex) {
+                activeTargetIndex = null;
+                setStatus('lost');
+              }
+            };
+          }),
+        );
 
         await mindarThree.start();
 
@@ -219,31 +191,11 @@ export default function MindARViewer({ target }: MindARViewerProps) {
           return;
         }
 
-        setStatus('scanning');
-        setMessage('Point camera at the shirt graphic...');
+        setIsLoading(false);
+        setStatus((currentStatus) =>
+          currentStatus === 'starting' ? 'scanning' : currentStatus,
+        );
         renderer.setAnimationLoop(() => {
-          const delta = clock.getDelta();
-
-          if (overlayGroup?.visible && anchor.group.visible) {
-            anchor.group.matrix.decompose(targetPosition, targetQuaternion, targetScale);
-
-            if (!hasSmoothedFrame) {
-              smoothPosition.copy(targetPosition);
-              smoothQuaternion.copy(targetQuaternion);
-              smoothScale.copy(targetScale);
-              hasSmoothedFrame = true;
-            } else {
-              smoothPosition.lerp(targetPosition, smoothingAmount);
-              smoothQuaternion.slerp(targetQuaternion, smoothingAmount);
-              smoothScale.lerp(targetScale, smoothingAmount);
-            }
-
-            overlayGroup.position.copy(smoothPosition);
-            overlayGroup.quaternion.copy(smoothQuaternion);
-            overlayGroup.scale.copy(smoothScale);
-          }
-
-          mixer?.update(delta);
           renderer.render(scene, camera);
         });
       } catch (error) {
@@ -252,11 +204,11 @@ export default function MindARViewer({ target }: MindARViewerProps) {
         }
 
         setStatus('error');
-        setMessage(getFriendlyError(error));
+        setIsLoading(false);
       }
     };
 
-    startAR();
+    void startAR();
 
     return () => {
       isMounted = false;
@@ -267,62 +219,52 @@ export default function MindARViewer({ target }: MindARViewerProps) {
         mindarThree.renderer.dispose();
       }
 
-      mixer?.stopAllAction();
-      video?.pause();
-      video?.removeAttribute('src');
-      video?.load();
-      videoTexture?.dispose();
-      overlayGroup?.removeFromParent();
-      model?.traverse((child) => {
-        if (child instanceof THREE.Mesh) {
-          child.geometry.dispose();
+      videos.forEach((video) => {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+      });
 
-          const materials = Array.isArray(child.material)
-            ? child.material
-            : [child.material];
-
-          materials.forEach((material) => material.dispose());
-        }
+      runtimes.forEach(({ texture, geometry, material, mesh }) => {
+        mesh.removeFromParent();
+        texture.dispose();
+        material.dispose();
+        geometry.dispose();
       });
     };
-  }, [target]);
+  }, []);
 
-  const showScanningOverlay = status === 'starting' || status === 'scanning' || status === 'lost';
-  const showBootSplash = status === 'starting';
-  const showFoundBadge = status === 'found';
-
-  const statusLabel =
-    status === 'error'
-      ? 'ERROR'
-      : status === 'found'
-        ? 'SUCCESS'
-        : status === 'lost'
-          ? 'SEARCH'
-          : 'SCAN';
+  const showBootSplash = isLoading;
 
   return (
     <div className="ar-shell">
-      <div ref={containerRef} className="ar-container" />
-
-      <div className="game-viewport" aria-hidden="true">
-        <div className="game-viewport__shade" />
-        <div className="game-viewport__frame">
-          <span className="game-viewport__corner game-viewport__corner--tl" />
-          <span className="game-viewport__corner game-viewport__corner--tr" />
-          <span className="game-viewport__corner game-viewport__corner--br" />
-          <span className="game-viewport__corner game-viewport__corner--bl" />
-          <span className="game-viewport__stud game-viewport__stud--top-left" />
-          <span className="game-viewport__stud game-viewport__stud--top-right" />
-          <span className="game-viewport__stud game-viewport__stud--bottom-left" />
-          <span className="game-viewport__stud game-viewport__stud--bottom-right" />
+      <div
+        id="custom-scanning-overlay"
+        className="scanner-overlay"
+        aria-hidden="true"
+      >
+        <img
+          className="scanner-border"
+          src="/ui/scanner-border-1080x1920.png"
+          alt=""
+        />
+        <div className="scanner-top">
+          <img
+            className="scanner-title"
+            src="/ui/scanner-title.png"
+            alt="AR Scanner"
+          />
         </div>
-        <div className="game-viewport__title">AR SCANNER</div>
-        <div className="game-viewport__hearts" aria-hidden="true">
-          <span>♥</span>
-          <span>♥</span>
-          <span>♥</span>
-        </div>
+        <img
+          id="custom-scanning-frame"
+          className="scanner-frame hidden"
+          src="/ui/scanner-frame.png"
+          alt=""
+        />
+        <img className="scanner-bottom" src="/ui/scanner-bottom.png" alt="" />
       </div>
+
+      <div ref={containerRef} className="ar-container" />
 
       {showBootSplash && (
         <div className="boot-splash" aria-hidden="true">
@@ -332,10 +274,16 @@ export default function MindARViewer({ target }: MindARViewerProps) {
               <span className="boot-splash__close">X</span>
             </div>
             <div className="boot-splash__body">
+              <video
+                className="boot-splash__animation"
+                src={LOADING_ANIMATION_SRC}
+                autoPlay
+                loop
+                muted
+                playsInline
+                preload="auto"
+              />
               <p className="boot-splash__title">LOADING...</p>
-              <div className="boot-splash__bar">
-                <div className="boot-splash__bar-fill" />
-              </div>
               <div className="boot-splash__hearts" aria-hidden="true">
                 <span className="boot-splash__heart">♥</span>
                 <span className="boot-splash__heart">♥</span>
@@ -346,38 +294,6 @@ export default function MindARViewer({ target }: MindARViewerProps) {
         </div>
       )}
 
-      {showScanningOverlay && (
-        <div className="scan-overlay" aria-hidden="true">
-          <div className="scan-hud-top">SCANNING...</div>
-          <div className="scan-frame">
-            <div className="scan-frame__box">
-              <span className="scan-frame__edge scan-frame__edge--top" />
-              <span className="scan-frame__edge scan-frame__edge--right" />
-              <span className="scan-frame__edge scan-frame__edge--bottom" />
-              <span className="scan-frame__edge scan-frame__edge--left" />
-            </div>
-            <span className="scan-frame__corner scan-frame__corner--tl" />
-            <span className="scan-frame__corner scan-frame__corner--tr" />
-            <span className="scan-frame__corner scan-frame__corner--br" />
-            <span className="scan-frame__corner scan-frame__corner--bl" />
-            <div className="scan-line" />
-          </div>
-        </div>
-      )}
-
-      {showFoundBadge && (
-        <div className="found-badge" aria-hidden="true">
-          FOUND!
-        </div>
-      )}
-
-      <div className={`status-dialog status-dialog--${status}`} role="status">
-        <div className="status-dialog__header">
-          <span>{statusLabel}</span>
-          <span className="status-dialog__dot" aria-hidden="true" />
-        </div>
-        <div className="status-dialog__body">{message}</div>
-      </div>
     </div>
   );
 }

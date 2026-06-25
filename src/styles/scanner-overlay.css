@@ -1,0 +1,84 @@
+.scanner-overlay {
+  display: block;
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
+  z-index: 9999;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.scanner-border {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+}
+
+.scanner-top {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 32px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(72vw, 420px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: clamp(10px, 1.8vh, 18px);
+}
+
+.scanner-title {
+  width: 82%;
+  height: auto;
+  display: block;
+}
+
+.scanner-frame {
+  position: absolute;
+  left: 50%;
+  top: 53%;
+  width: min(72vw, 430px);
+  height: auto;
+  transform: translate(-50%, -50%);
+  display: block;
+}
+
+.scanner-frame.hidden {
+  display: none;
+}
+
+.scanner-bottom {
+  position: absolute;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 34px);
+  width: min(34vw, 180px);
+  height: auto;
+  transform: translateX(-50%);
+  display: block;
+}
+
+@media (max-height: 700px) {
+  .scanner-top {
+    top: calc(env(safe-area-inset-top, 0px) + 20px);
+    width: min(68vw, 380px);
+    gap: 8px;
+  }
+
+  .scanner-frame {
+    top: 56%;
+    width: min(68vw, 390px);
+  }
+
+  .scanner-bottom {
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 20px);
+    width: min(28vw, 150px);
+  }
+}
+
+@media (orientation: landscape) {
+  .scanner-overlay {
+    display: none !important;
+  }
+}
